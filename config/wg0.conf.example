@@ -1,0 +1,17 @@
+# Copy to /etc/wireguard/wg0.conf (chmod 600) and fill in the values from the
+# config downloaded at account.protonvpn.com -> Downloads -> WireGuard configuration
+# (platform: GNU/Linux). NEVER commit the real file; it contains your private key.
+
+[Interface]
+PrivateKey = <your-private-key>
+Address = 10.2.0.2/32
+# No DNS= line: wg-quick would need resolvconf. DNS is handled by unbound,
+# which forwards to 10.2.0.1 through the tunnel.
+# MTU = 1420
+
+[Peer]
+PublicKey = <proton-server-public-key>
+# IPv4 only: IPv6 is disabled on the gateway, and a ::/0 route would make wg-quick fail.
+AllowedIPs = 0.0.0.0/0
+Endpoint = <proton-server-ip>:51820
+PersistentKeepalive = 25

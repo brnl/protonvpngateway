@@ -1,0 +1,15 @@
+# /etc/network/interfaces (Debian, ifupdown)
+# Interface names on a Proxmox VM with virtio NICs are usually ens18 and ens19;
+# check with `ip -br link`.
+
+auto lo
+iface lo inet loopback
+
+# NIC A: uplink (toward the router/internet)
+allow-hotplug ens18
+iface ens18 inet dhcp
+
+# NIC B: client side. Clients use 10.10.10.1 as gateway and DNS.
+auto ens19
+iface ens19 inet static
+    address 10.10.10.1/24
