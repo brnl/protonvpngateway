@@ -1,0 +1,7 @@
+# Real WireGuard configs and keys contain private keys
+wg0.conf
+*.key
+
+# Local Ansible inventory and variables (see examples/)
+/inventory.yml
+/group_vars/

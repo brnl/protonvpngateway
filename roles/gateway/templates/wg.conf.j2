@@ -1,0 +1,17 @@
+{{ ansible_managed | comment }}
+# No DNS= line: wg-quick would need resolvconf. DNS is handled by unbound, which
+# forwards to {{ gateway_wg_dns }} through the tunnel.
+
+[Interface]
+PrivateKey = {{ gateway_wg_private_key }}
+Address = {{ gateway_wg_address }}
+{% if gateway_wg_mtu | string | length > 0 %}
+MTU = {{ gateway_wg_mtu }}
+{% endif %}
+
+[Peer]
+PublicKey = {{ gateway_wg_peer_public_key }}
+# IPv4 only: IPv6 is disabled on the gateway, and a ::/0 route would make wg-quick fail.
+AllowedIPs = 0.0.0.0/0
+Endpoint = {{ gateway_wg_endpoint_ip }}:{{ gateway_wg_endpoint_port }}
+PersistentKeepalive = {{ gateway_wg_keepalive }}

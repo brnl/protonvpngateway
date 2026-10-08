@@ -1,0 +1,5 @@
+---
+# Copy to ./group_vars/gateway/vault.yml, fill in, then encrypt it:
+#   ansible-vault encrypt group_vars/gateway/vault.yml
+# Never commit the unencrypted file (group_vars/ is git-ignored).
+gateway_wg_private_key: "<your-private-key>"

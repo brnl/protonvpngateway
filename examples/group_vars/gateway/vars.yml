@@ -1,0 +1,19 @@
+---
+# Copy this directory to ./group_vars/gateway/ (git-ignored). All variables and
+# their defaults are documented in roles/gateway/defaults/main.yml.
+
+gateway_wan_if: ens18
+gateway_lan_if: ens19
+gateway_lan_addr: 10.10.10.1
+gateway_lan_net: 10.10.10.0/24
+
+# Uplink networks allowed to SSH in. Needed when your control node reaches the
+# gateway over NIC A (otherwise SSH is only open on NIC B).
+# gateway_ssh_wan_allow:
+#   - 192.168.1.0/24
+
+# From the [Interface] and [Peer] sections of the Proton WireGuard config.
+gateway_wg_address: 10.2.0.2/32
+gateway_wg_peer_public_key: "<proton-server-public-key>"
+gateway_wg_endpoint_ip: "<proton-server-ip>"
+gateway_wg_endpoint_port: 51820

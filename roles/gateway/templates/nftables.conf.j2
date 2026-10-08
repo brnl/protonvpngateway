@@ -1,0 +1,79 @@
+#!/usr/sbin/nft -f
+{{ ansible_managed | comment }}
+# ProtonVPN gateway ruleset.
+#   WAN = NIC A: uplink, only carries the WireGuard tunnel itself
+#   LAN = NIC B: clients whose traffic is routed through the VPN
+#   VPN = {{ gateway_wg_if }}: ProtonVPN tunnel
+#
+# Kill switch: there is no forward rule from LAN to WAN, so when the tunnel is
+# down client traffic is dropped instead of leaking out over the uplink.
+
+define WAN = "{{ gateway_wan_if }}"
+define LAN = "{{ gateway_lan_if }}"
+define VPN = "{{ gateway_wg_if }}"
+define WG_ENDPOINT = {{ gateway_wg_endpoint_ip }}
+define WG_PORT = {{ gateway_wg_endpoint_port }}
+
+# Idempotent reload; leaves tables created by other tools (e.g. wg-quick) alone.
+table inet gateway
+delete table inet gateway
+
+table inet gateway {
+	chain input {
+		type filter hook input priority filter; policy drop;
+
+		iifname "lo" accept
+		ct state established,related accept
+		ct state invalid drop
+
+		# Services for clients on NIC B only: ping, SSH, DNS
+		iifname $LAN icmp type echo-request accept
+		iifname $LAN tcp dport {{ gateway_ssh_port }} accept
+		iifname $LAN udp dport 53 accept
+		iifname $LAN tcp dport 53 accept
+{% if gateway_ssh_wan_allow | length > 0 %}
+
+		# SSH from these uplink networks (management, e.g. Ansible)
+		iifname $WAN ip saddr { {{ gateway_ssh_wan_allow | join(', ') }} } tcp dport {{ gateway_ssh_port }} accept
+{% endif %}
+
+		# DHCP lease renewal on the uplink
+		iifname $WAN udp sport 67 udp dport 68 accept
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy drop;
+
+		ct state established,related accept
+		ct state invalid drop
+
+		# Clamp MSS to the tunnel MTU so large transfers don't stall
+		iifname $LAN oifname $VPN tcp flags syn tcp option maxseg size set rt mtu
+
+		# The only allowed path: clients -> VPN
+		iifname $LAN oifname $VPN accept
+	}
+
+	chain output {
+		type filter hook output priority filter; policy drop;
+
+		oifname "lo" accept
+		ct state established,related accept
+
+		# Everything the gateway itself sends (DNS, apt, NTP) goes via the VPN
+		oifname $VPN accept
+
+		# The only things allowed out on the uplink: WireGuard to the Proton
+		# endpoint, and DHCP
+		oifname $WAN ip daddr $WG_ENDPOINT udp dport $WG_PORT accept
+		oifname $WAN udp sport 68 udp dport 67 accept
+
+		oifname $LAN accept
+	}
+
+	chain postrouting {
+		type nat hook postrouting priority srcnat; policy accept;
+
+		oifname $VPN masquerade
+	}
+}

@@ -1,0 +1,29 @@
+---
+# Interfaces. On a Proxmox VM with virtio NICs these are usually ens18/ens19;
+# check with `ip -br link` on the VM.
+gateway_wan_if: ens18 # NIC A: uplink, carries the WireGuard tunnel
+gateway_lan_if: ens19 # NIC B: clients, all their traffic goes through the VPN
+
+# Client side network (NIC B). The gateway has this address and is DNS server.
+gateway_lan_addr: 10.10.10.1
+gateway_lan_net: 10.10.10.0/24
+
+# SSH port, and uplink (NIC A) networks that may SSH in. By default SSH is only
+# reachable from NIC B. List the network your Ansible control node is on if you
+# manage the gateway over the uplink, e.g. ["192.168.1.0/24"].
+gateway_ssh_port: 22
+gateway_ssh_wan_allow: []
+
+# WireGuard / ProtonVPN. Take these from the config downloaded at
+# account.protonvpn.com -> Downloads -> WireGuard configuration (GNU/Linux).
+gateway_wg_if: wg0
+gateway_wg_address: 10.2.0.2/32 # [Interface] Address
+gateway_wg_dns: 10.2.0.1 # [Interface] DNS; unbound forwards to it through the tunnel
+gateway_wg_mtu: "" # empty = wg-quick default (1420)
+gateway_wg_keepalive: 25
+
+# Required, no defaults. Put the private key in an ansible-vault file.
+gateway_wg_private_key: "" # [Interface] PrivateKey
+gateway_wg_peer_public_key: "" # [Peer] PublicKey
+gateway_wg_endpoint_ip: "" # [Peer] Endpoint, the IP part
+gateway_wg_endpoint_port: 51820 # [Peer] Endpoint, the port part

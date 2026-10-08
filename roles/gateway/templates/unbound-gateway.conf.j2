@@ -1,0 +1,19 @@
+{{ ansible_managed | comment }}
+# DNS forwarder for the clients on NIC B. All queries go to ProtonVPN's resolver
+# through the tunnel, so nothing is resolved by the ISP.
+
+server:
+    interface: 127.0.0.1
+    interface: {{ gateway_lan_addr }}
+    # NIC B may come up after unbound
+    ip-freebind: yes
+    access-control: 127.0.0.0/8 allow
+    access-control: {{ gateway_lan_net }} allow
+    do-ip6: no
+    hide-identity: yes
+    hide-version: yes
+    prefetch: yes
+
+forward-zone:
+    name: "."
+    forward-addr: {{ gateway_wg_dns }}
