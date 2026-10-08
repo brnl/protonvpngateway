@@ -1,16 +1,18 @@
 #!/usr/sbin/nft -f
+{{ ansible_managed | comment }}
 # ProtonVPN gateway ruleset.
 #   WAN = NIC A: uplink, only carries the WireGuard tunnel itself
 #   LAN = NIC B: clients whose traffic is routed through the VPN
-#   VPN = wg0:   ProtonVPN tunnel
+#   VPN = {{ gateway_wg_if }}: ProtonVPN tunnel
 #
-# Kill switch: there is no forward rule from LAN to WAN, so when wg0 is down
-# client traffic is dropped instead of leaking out over the uplink.
+# Kill switch: there is no forward rule from LAN to WAN, so when the tunnel is
+# down client traffic is dropped instead of leaking out over the uplink.
 
-define WAN = "ens18"
-define LAN = "ens19"
-define VPN = "wg0"
-define WG_PORT = 51820
+define WAN = "{{ gateway_wan_if }}"
+define LAN = "{{ gateway_lan_if }}"
+define VPN = "{{ gateway_wg_if }}"
+define WG_ENDPOINT = {{ gateway_wg_endpoint_ip }}
+define WG_PORT = {{ gateway_wg_endpoint_port }}
 
 # Idempotent reload; leaves tables created by other tools (e.g. wg-quick) alone.
 table inet gateway
@@ -26,9 +28,14 @@ table inet gateway {
 
 		# Services for clients on NIC B only: ping, SSH, DNS
 		iifname $LAN icmp type echo-request accept
-		iifname $LAN tcp dport 22 accept
+		iifname $LAN tcp dport {{ gateway_ssh_port }} accept
 		iifname $LAN udp dport 53 accept
 		iifname $LAN tcp dport 53 accept
+{% if gateway_ssh_wan_allow | length > 0 %}
+
+		# SSH from these uplink networks (management, e.g. Ansible)
+		iifname $WAN ip saddr { {{ gateway_ssh_wan_allow | join(', ') }} } tcp dport {{ gateway_ssh_port }} accept
+{% endif %}
 
 		# DHCP lease renewal on the uplink
 		iifname $WAN udp sport 67 udp dport 68 accept
@@ -56,8 +63,9 @@ table inet gateway {
 		# Everything the gateway itself sends (DNS, apt, NTP) goes via the VPN
 		oifname $VPN accept
 
-		# The only things allowed out on the uplink: WireGuard and DHCP
-		oifname $WAN udp dport $WG_PORT accept
+		# The only things allowed out on the uplink: WireGuard to the Proton
+		# endpoint, and DHCP
+		oifname $WAN ip daddr $WG_ENDPOINT udp dport $WG_PORT accept
 		oifname $WAN udp sport 68 udp dport 67 accept
 
 		oifname $LAN accept

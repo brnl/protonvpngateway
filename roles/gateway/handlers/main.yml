@@ -1,0 +1,21 @@
+---
+- name: Apply sysctl
+  ansible.builtin.command: sysctl --system
+  changed_when: true
+
+# `nft -f` replaces only the "gateway" table (see the ruleset). Do NOT use
+# `systemctl restart nftables`: its stop action runs `nft flush ruleset`, which
+# briefly removes the kill switch and NAT, and wg-quick's own rules.
+- name: Reload nftables
+  ansible.builtin.command: /usr/sbin/nft -f /etc/nftables.conf
+  changed_when: true
+
+- name: Restart unbound
+  ansible.builtin.systemd:
+    name: unbound
+    state: restarted
+
+- name: Restart WireGuard
+  ansible.builtin.systemd:
+    name: "wg-quick@{{ gateway_wg_if }}"
+    state: restarted

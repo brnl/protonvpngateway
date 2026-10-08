@@ -1,0 +1,115 @@
+---
+- name: Check required variables
+  ansible.builtin.assert:
+    that:
+      - gateway_wg_private_key | length > 0
+      - gateway_wg_peer_public_key | length > 0
+      - gateway_wg_endpoint_ip is match('^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+    fail_msg: >-
+      Set gateway_wg_private_key, gateway_wg_peer_public_key and gateway_wg_endpoint_ip
+      (an IPv4 address) from your Proton WireGuard config, see examples/group_vars/gateway/.
+    quiet: true
+
+- name: Check that both NICs exist
+  ansible.builtin.assert:
+    that:
+      - gateway_wan_if in ansible_facts.interfaces
+      - gateway_lan_if in ansible_facts.interfaces
+    fail_msg: >-
+      {{ gateway_wan_if }} and/or {{ gateway_lan_if }} not found on the host
+      (found: {{ ansible_facts.interfaces | join(', ') }}). Set gateway_wan_if and gateway_lan_if.
+    quiet: true
+
+- name: Install packages
+  ansible.builtin.apt:
+    name:
+      - wireguard-tools
+      - nftables
+      - unbound
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Enable IP forwarding and disable IPv6
+  ansible.builtin.copy:
+    src: 99-gateway.conf
+    dest: /etc/sysctl.d/99-gateway.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Apply sysctl
+
+- name: Install firewall ruleset
+  ansible.builtin.template:
+    src: nftables.conf.j2
+    dest: /etc/nftables.conf
+    owner: root
+    group: root
+    mode: "0755"
+    validate: /usr/sbin/nft -c -f %s
+  notify: Reload nftables
+
+- name: Configure unbound as DNS forwarder for the clients
+  ansible.builtin.template:
+    src: unbound-gateway.conf.j2
+    dest: /etc/unbound/unbound.conf.d/gateway.conf
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/sbin/unbound-checkconf %s
+  notify: Restart unbound
+
+- name: Install WireGuard config
+  ansible.builtin.template:
+    src: wg.conf.j2
+    dest: "/etc/wireguard/{{ gateway_wg_if }}.conf"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true # contains the private key
+  notify: Restart WireGuard
+
+# Handlers normally run at the end of the play. Run them now so a changed config is
+# active before the services are (idempotently) enabled below; on a first run the
+# restart handlers simply start the services.
+- name: Apply pending changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop:
+    - nftables
+    - unbound
+    - "wg-quick@{{ gateway_wg_if }}"
+
+# The gateway resolves through its own unbound (and thus the tunnel); the firewall
+# blocks DNS to the ISP's resolver anyway.
+- name: Check for dhclient config
+  ansible.builtin.stat:
+    path: /etc/dhcp/dhclient.conf
+  register: gateway_dhclient_conf
+
+- name: Keep dhclient from overwriting the local resolver
+  ansible.builtin.lineinfile:
+    path: /etc/dhcp/dhclient.conf
+    regexp: "^supersede domain-name-servers"
+    line: "supersede domain-name-servers 127.0.0.1;"
+  when: gateway_dhclient_conf.stat.exists
+
+- name: Check whether resolv.conf is a symlink
+  ansible.builtin.stat:
+    path: /etc/resolv.conf
+    follow: false
+  register: gateway_resolv_conf
+
+- name: Point the gateway's own resolver at unbound
+  ansible.builtin.copy:
+    dest: /etc/resolv.conf
+    content: "nameserver 127.0.0.1\n"
+    owner: root
+    group: root
+    mode: "0644"
+  when: not (gateway_resolv_conf.stat.islnk | default(false))
