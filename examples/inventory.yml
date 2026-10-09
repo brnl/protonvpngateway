@@ -2,7 +2,7 @@
 # Copy to ./inventory.yml (git-ignored) and adjust.
 all:
   children:
-    gateway:
+    vpngateway:
       hosts:
         protonvpngateway:
           # NIC B address (gateway_lan_addr) if your control node is on the client

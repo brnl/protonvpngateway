@@ -1,6 +1,10 @@
 # Real WireGuard configs and keys contain private keys
 wg0.conf
 *.key
+# ...including the config downloaded from Proton if you keep it in the repo directory
+/*.conf
+wg-*.conf
+proton*.conf
 
 # Local Ansible inventory and variables (see examples/)
 /inventory.yml
