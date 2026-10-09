@@ -22,6 +22,7 @@ role. Both are repeatable: re-running them only changes (and restarts) what actu
 | Path | Purpose |
 |---|---|
 | `scripts/setup.sh` | Standalone setup script (Option A): installs and configures everything |
+| `scripts/reset.sh` | Undoes the setup (script or role): back to a plain Debian host |
 | `site.yml` | Playbook, applies the `gateway` role to the `vpngateway` group (Option B) |
 | `roles/gateway/defaults/main.yml` | All variables with documentation |
 | `roles/gateway/templates/nftables.conf.j2` | Firewall: NAT, MSS clamp, kill switch |
@@ -84,6 +85,18 @@ SSH is only open on NIC B by default. Two things to know when you manage the VM 
   Replies to SSH from a network *behind* your router (not the subnet NIC A is in) would end up
   in the tunnel and get lost. Manage the gateway from NIC B or from the same subnet as NIC A.
 
+### Locked out over SSH?
+On the Proxmox console, type:
+```
+nft insert rule inet gateway input tcp dport 22 accept
+```
+SSH works again straight away and the kill switch and NAT stay in place. This is temporary
+(gone after a reboot, a firewall reload or another `setup.sh` run) and opens SSH to everyone on
+NIC A until then, so follow up by setting `SSH_WAN_ALLOW` / `gateway_ssh_wan_allow` and
+re-applying. If you are in a different subnet than NIC A, the firewall isn't the (only)
+problem, see "Routing" above: `systemctl stop wg-quick@wg0` makes SSH work from anywhere
+(clients on NIC B then have no internet, but don't leak); start it again afterwards.
+
 ## Idempotency
 Re-running the script or the playbook is safe: files are only rewritten when they differ, and a
 service is reloaded or restarted only when its own config changed. Notably:
@@ -94,6 +107,29 @@ service is reloaded or restarted only when its own config changed. Notably:
   disconnected by a no-op run.
 - The private key is never printed: the role installs `wg0.conf` with `no_log` (so it is not in
   `--diff` output either), and the script doesn't echo it.
+
+## Reset
+`scripts/reset.sh` takes the VM back to a plain Debian host, whether you used the script or the
+Ansible role:
+```
+sudo ./scripts/reset.sh --dry-run      # show what it would do, change nothing
+sudo ./scripts/reset.sh                # show the plan, ask for confirmation, then do it
+```
+It stops the tunnel and deletes `wg0.conf` (your Proton private key; `--keep-wg-conf` keeps it),
+removes the `gateway` nftables table and puts Debian's stock `/etc/nftables.conf` back, removes the
+unbound forwarder config and the sysctl file (forwarding off, IPv6 on), and restores the DNS
+settings (the servers come from the last DHCP lease of NIC A, or `DNS_SERVERS="1.2.3.4"`).
+`--purge-packages` also purges `wireguard-tools` and `unbound` (not `nftables`).
+
+- It only touches files that still carry this project's marker text, so a config you wrote
+  yourself is left alone and mentioned.
+- It does not touch network interface config, the repo or your Proton download. Clients lose
+  their internet (no forwarding, no NAT); they don't leak.
+- Running it again is a no-op ("Nothing to reset"). If a step fails the others still run and the
+  exit code is non-zero; if the tunnel can't be stopped, `wg0.conf` is kept so `wg-quick` can take
+  it down. Reboot afterwards to make sure IPv6 is fully back.
+- Set up again with `./scripts/setup.sh proton.conf`. Re-running the Ansible playbook does the
+  same.
 
 ## How the kill switch works
 - `wg-quick` routes all traffic through `wg0` and keeps the WireGuard packets themselves on
