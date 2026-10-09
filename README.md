@@ -30,16 +30,21 @@ role. Both are repeatable: re-running them only changes (and restarts) what actu
 | `roles/gateway/templates/unbound-gateway.conf.j2` | DNS forwarder that resolves through the tunnel |
 | `roles/gateway/files/99-gateway.conf` | sysctl: IP forwarding on, IPv6 off |
 | `examples/` | Example inventory and variables to copy |
-| `docs/interfaces.example` | Network config for both NICs (not managed by the script or the role) |
+| `docs/interfaces.example` | Network config for both NICs (by hand; the script does NIC B itself, see Setup) |
 
 ## Setup
 1. **Proxmox:** create a VM with two virtio NICs. `net0` goes on the bridge toward your
    router (NIC A), `net1` on the bridge for the clients (NIC B). Install Debian 12 or 13
    (minimal + SSH server) and make sure you can SSH in and `sudo`.
-2. **Network:** configure both NICs as in `docs/interfaces.example`
-   (check names with `ip -br link`; on Proxmox they are usually `ens18`/`ens19`).
-   Neither the script nor the role touches interface config, so they can't cut off your SSH
-   session.
+2. **Network:** NIC A (the uplink, usually DHCP) must already work; it is how you reach the VM, so
+   neither the script nor the role ever touches it. NIC B (the client side) is configured by
+   `setup.sh` if it has no address yet: it writes
+   `/etc/network/interfaces.d/protonvpngateway-lan` (static `LAN_ADDR`) and runs `ifup`. That
+   needs ifupdown, which is what a Debian netinst uses. On another network setup (NetworkManager,
+   systemd-networkd) it adds the address until the next reboot and tells you to make it
+   permanent. The Ansible role does not configure NIC B: do it by hand as in
+   `docs/interfaces.example`. Check the NIC names with `ip -br link`; on Proxmox they are
+   usually `ens18`/`ens19`.
 3. **Proton config:** at account.protonvpn.com → Downloads → WireGuard configuration,
    pick platform *GNU/Linux* and a server, then download it. The script reads this file as is;
    for Ansible you need four values from it: `PrivateKey`, `Address`, the peer `PublicKey` and
@@ -81,9 +86,14 @@ SSH is only open on NIC B by default. Two things to know when you manage the VM 
   `["192.168.1.0/24"]`) or `SSH_WAN_ALLOW="192.168.1.0/24"` (script). Otherwise the firewall
   blocks new SSH connections on NIC A once it is applied; a running session survives, but the
   next one will not connect (use the Proxmox console to recover).
-- **Routing:** `wg-quick` sends everything except WireGuard's own packets into the tunnel.
-  Replies to SSH from a network *behind* your router (not the subnet NIC A is in) would end up
-  in the tunnel and get lost. Manage the gateway from NIC B or from the same subnet as NIC A.
+- **Routing:** `wg-quick` sends everything that doesn't carry its fwmark into the tunnel, which
+  would swallow the replies to an SSH session from a network *behind* your router (any network
+  that isn't NIC A's own subnet): the session works until the tunnel starts, then it hangs. The
+  firewall therefore marks SSH replies (`tcp sport <ssh port>`, table `ip gateway_route`) with
+  that fwmark, and `wg0.conf` pins it (`FwMark = 51820`), so they always leave via NIC A. This
+  works from any source network the firewall allows, and an SSH session that is open while the
+  tunnel starts, such as the one you run `setup.sh` in, survives. Requirement: loose reverse-path
+  filtering (`rp_filter = 2`, Debian's default); the sysctl file sets it for all interfaces.
 
 ### Locked out over SSH?
 On the Proxmox console, type:
@@ -93,9 +103,15 @@ nft insert rule inet gateway input tcp dport 22 accept
 SSH works again straight away and the kill switch and NAT stay in place. This is temporary
 (gone after a reboot, a firewall reload or another `setup.sh` run) and opens SSH to everyone on
 NIC A until then, so follow up by setting `SSH_WAN_ALLOW` / `gateway_ssh_wan_allow` and
-re-applying. If you are in a different subnet than NIC A, the firewall isn't the (only)
-problem, see "Routing" above: `systemctl stop wg-quick@wg0` makes SSH work from anywhere
-(clients on NIC B then have no internet, but don't leak); start it again afterwards.
+re-applying. Run it as root (or with `sudo`: `nft` lives in `/usr/sbin`, which isn't on a
+normal user's PATH).
+
+If SSH still doesn't work and you are in a different subnet than NIC A, your system may still be
+running an older version without the SSH reply marking (see "Routing" above). Update it by
+re-running `setup.sh`. Until then, on the console: `ip rule add ipproto tcp sport 22 lookup main
+priority 100` (until the next reboot), or `systemctl stop wg-quick@wg0` (SSH then works from
+anywhere; clients on NIC B have no internet but don't leak; `systemctl start wg-quick@wg0`
+brings it back).
 
 ## Idempotency
 Re-running the script or the playbook is safe: files are only rewritten when they differ, and a
@@ -116,15 +132,17 @@ sudo ./scripts/reset.sh --dry-run      # show what it would do, change nothing
 sudo ./scripts/reset.sh                # show the plan, ask for confirmation, then do it
 ```
 It stops the tunnel and deletes `wg0.conf` (your Proton private key; `--keep-wg-conf` keeps it),
-removes the `gateway` nftables table and puts Debian's stock `/etc/nftables.conf` back, removes the
-unbound forwarder config and the sysctl file (forwarding off, IPv6 on), and restores the DNS
-settings (the servers come from the last DHCP lease of NIC A, or `DNS_SERVERS="1.2.3.4"`).
+removes the `gateway` and `gateway_route` nftables tables and puts Debian's stock
+`/etc/nftables.conf` back, removes the unbound forwarder config and the sysctl file (forwarding
+off, IPv6 on), takes NIC B down again and removes the snippet `setup.sh` wrote for it, and restores
+the DNS settings (the servers come from the last DHCP lease of NIC A, or
+`DNS_SERVERS="1.2.3.4"`).
 `--purge-packages` also purges `wireguard-tools` and `unbound` (not `nftables`).
 
 - It only touches files that still carry this project's marker text, so a config you wrote
   yourself is left alone and mentioned.
-- It does not touch network interface config, the repo or your Proton download. Clients lose
-  their internet (no forwarding, no NAT); they don't leak.
+- It does not touch NIC A, the repo or your Proton download. Clients lose their internet (no
+  forwarding, no NAT); they don't leak.
 - Running it again is a no-op ("Nothing to reset"). If a step fails the others still run and the
   exit code is non-zero; if the tunnel can't be stopped, `wg0.conf` is kept so `wg-quick` can take
   it down. Reboot afterwards to make sure IPv6 is fully back.
@@ -133,7 +151,7 @@ settings (the servers come from the last DHCP lease of NIC A, or `DNS_SERVERS="1
 
 ## How the kill switch works
 - `wg-quick` routes all traffic through `wg0` and keeps the WireGuard packets themselves on
-  NIC A using a firewall mark.
+  NIC A using a firewall mark (51820). SSH replies get the same mark, see "Routing" above.
 - The `forward` chain only allows `LAN → wg0`. There is no rule from `LAN` to `WAN`, so when
   the tunnel is down, client packets are dropped.
 - The `output` chain only allows the gateway itself to use NIC A for WireGuard (UDP to the
