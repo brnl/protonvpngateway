@@ -77,3 +77,21 @@ table inet gateway {
 		oifname $VPN masquerade
 	}
 }
+
+# SSH replies must leave via the uplink, never through the tunnel. wg-quick sends everything
+# that doesn't carry its fwmark into the tunnel, which swallows the replies to an SSH session
+# from any network that isn't the uplink's own subnet. Marking them with that fwmark makes them
+# take the normal route. This lives in the firewall, which is loaded before the tunnel starts
+# and doesn't depend on the order of wg-quick's routing rules, so an SSH session that is open
+# while the tunnel comes up survives. (Chains of type "route" exist for ip/ip6 only; the
+# tunnel is IPv4-only.)
+table ip gateway_route
+delete table ip gateway_route
+
+table ip gateway_route {
+	chain output {
+		type route hook output priority mangle; policy accept;
+
+		tcp sport {{ gateway_ssh_port }} meta mark set {{ gateway_wg_fwmark }}
+	}
+}

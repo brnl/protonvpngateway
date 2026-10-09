@@ -8,6 +8,9 @@ Address = {{ gateway_wg_address }}
 {% if gateway_wg_mtu | string | length > 0 %}
 MTU = {{ gateway_wg_mtu }}
 {% endif %}
+# wg-quick routes everything that doesn't carry this fwmark into the tunnel. The firewall
+# marks SSH replies with it (table ip gateway_route), so they stay on the uplink.
+FwMark = {{ gateway_wg_fwmark }}
 
 [Peer]
 PublicKey = {{ gateway_wg_peer_public_key }}

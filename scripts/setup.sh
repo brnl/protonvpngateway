@@ -19,8 +19,11 @@
 # Safe to re-run: a file is only rewritten when it differs, the firewall is reloaded with
 # `nft -f` (never `systemctl restart nftables`, whose stop action flushes the whole ruleset
 # and briefly removes the kill switch), and unbound / the tunnel are only restarted when
-# their own config changed. Network interfaces are NOT configured here (that could cut off
-# your SSH session); see docs/interfaces.example.
+# their own config changed.
+#
+# NIC A (WAN_IF) is how you reach this VM, so it is never touched: it must already work. NIC B
+# (LAN_IF) is given LAN_ADDR through ifupdown if it has no address yet (see docs/interfaces.example
+# to do it by hand, or if this system doesn't use ifupdown).
 #
 # The firewall, unbound and WireGuard configs are also in the Ansible role under
 # roles/gateway/. Keep the two in sync when you change one.
@@ -36,12 +39,38 @@ WG_IF=${WG_IF:-wg0}
 WG_MTU=${WG_MTU:-}
 WG_DNS=${WG_DNS:-10.2.0.1}
 WG_KEEPALIVE=${WG_KEEPALIVE:-25}
+WG_FWMARK=${WG_FWMARK:-51820} # wg-quick's own fwmark/table number; SSH replies get it, see nftables.conf
 ROOT=${ROOT:-} # test hook: install files under this prefix instead of /
 CHANGED=0 # set by write_file
 
 die() {
     echo "Error: $*" >&2
     exit 1
+}
+
+# valid_ipv4 <address>: four dot separated numbers, each 0-255
+valid_ipv4() {
+    local o
+    local IFS=.
+    [[ $1 =~ ^[0-9]+(\.[0-9]+){3}$ ]] || return 1
+    for o in $1; do
+        ((10#$o <= 255)) || return 1
+    done
+}
+
+ip_to_int() {
+    local a b c d
+    local IFS=.
+    read -r a b c d <<<"$1"
+    echo $(((10#$a << 24) + (10#$b << 16) + (10#$c << 8) + 10#$d))
+}
+
+# in_net <address> <net/prefix>: the address lies inside the network
+in_net() {
+    local len=${2#*/} mask
+    ((len >= 0 && len <= 32)) || return 1
+    mask=$((len == 0 ? 0 : (0xFFFFFFFF << (32 - len)) & 0xFFFFFFFF))
+    (( ($(ip_to_int "$1") & mask) == ($(ip_to_int "${2%/*}") & mask) ))
 }
 
 # conf_get <key> <file>: value of the first "Key = value" line, whitespace/CR trimmed.
@@ -115,6 +144,7 @@ render() {
     s=${s//@ENDPOINT_IP@/$ENDPOINT_IP}
     s=${s//@ENDPOINT_PORT@/$ENDPOINT_PORT}
     s=${s//@SSH_PORT@/$SSH_PORT}
+    s=${s//@WG_FWMARK@/$WG_FWMARK}
     s=${s//@SSH_WAN_BLOCK@/$SSH_WAN_BLOCK}
     printf '%s\n' "$s"
 }
@@ -197,6 +227,24 @@ table inet gateway {
 		oifname $VPN masquerade
 	}
 }
+
+# SSH replies must leave via the uplink, never through the tunnel. wg-quick sends everything
+# that doesn't carry its fwmark into the tunnel, which swallows the replies to an SSH session
+# from any network that isn't the uplink's own subnet. Marking them with that fwmark makes them
+# take the normal route. This lives in the firewall, which is loaded before the tunnel starts
+# and doesn't depend on the order of wg-quick's routing rules, so an SSH session that is open
+# while the tunnel comes up survives. (Chains of type "route" exist for ip/ip6 only; the
+# tunnel is IPv4-only.)
+table ip gateway_route
+delete table ip gateway_route
+
+table ip gateway_route {
+	chain output {
+		type route hook output priority mangle; policy accept;
+
+		tcp sport @SSH_PORT@ meta mark set @WG_FWMARK@
+	}
+}
 EOF
 }
 
@@ -233,6 +281,11 @@ net.ipv4.ip_forward = 1
 # IPv6 is disabled so nothing can bypass the IPv4-only tunnel
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
+
+# Loose reverse-path filtering (Debian's default). The kernel uses the larger of "all" and the
+# interface's value, so this keeps a stricter setting from dropping SSH sessions that come in over
+# the uplink while wg-quick's policy routing is active.
+net.ipv4.conf.all.rp_filter = 2
 EOF
 }
 
@@ -248,6 +301,9 @@ render_wg_conf() {
     if [[ -n $WG_MTU ]]; then
         echo "MTU = $WG_MTU"
     fi
+    echo "# wg-quick routes everything that doesn't carry this fwmark into the tunnel. The firewall"
+    echo "# marks SSH replies with it (table ip gateway_route), so they stay on the uplink."
+    echo "FwMark = $WG_FWMARK"
     echo
     echo "[Peer]"
     echo "PublicKey = $PEER_KEY"
@@ -272,6 +328,68 @@ build_ssh_wan_block() {
     SSH_WAN_BLOCK+="		iifname \$WAN ip saddr { ${joined%, } } tcp dport $SSH_PORT accept"
 }
 
+render_lan_nic() {
+    cat <<EOF
+# Managed by protonvpngateway scripts/setup.sh
+auto $LAN_IF
+iface $LAN_IF inet static
+    address $LAN_ADDR/${LAN_NET#*/}
+EOF
+}
+
+# using_ifupdown: this system's network config is /etc/network/interfaces (+ interfaces.d)
+using_ifupdown() {
+    command -v ifup >/dev/null 2>&1 &&
+        [[ -f $ROOT/etc/network/interfaces ]] &&
+        grep -qE '^[[:space:]]*source(-directory)?[[:space:]]+/etc/network/interfaces\.d' "$ROOT/etc/network/interfaces"
+}
+
+# configure_lan_nic: give NIC B its address if it has none (sets LAN_NOTE for the summary).
+# Only NIC B is ever configured: NIC A is how you reach this VM.
+configure_lan_nic() {
+    local snippet="$ROOT/etc/network/interfaces.d/protonvpngateway-lan"
+    local prefix=${LAN_NET#*/} defined_in existed=0 has_addr=0
+    LAN_NOTE=
+
+    if ip -4 -o addr show dev "$LAN_IF" 2>/dev/null | grep -qF "inet $LAN_ADDR/"; then
+        has_addr=1
+    fi
+    if [[ -f $snippet ]]; then
+        existed=1
+    elif ((has_addr)); then
+        LAN_NOTE="$LAN_IF already has $LAN_ADDR, left alone."
+        return 0
+    elif ! using_ifupdown; then
+        ip addr add "$LAN_ADDR/$prefix" dev "$LAN_IF"
+        ip link set "$LAN_IF" up
+        LAN_NOTE="$LAN_IF had no address and this system doesn't use ifupdown: added $LAN_ADDR/$prefix until the next reboot. Make it permanent in your network manager (see docs/interfaces.example)."
+        return 0
+    else
+        defined_in=$(grep -rlE "^[[:space:]]*iface[[:space:]]+${LAN_IF}[[:space:]]" "$ROOT/etc/network/interfaces" "$ROOT/etc/network/interfaces.d" 2>/dev/null || true)
+        if [[ -n $defined_in ]]; then
+            LAN_NOTE="$LAN_IF is configured in ${defined_in//$'\n'/, } but has no $LAN_ADDR; fix that there (or run: ifup $LAN_IF)."
+            return 0
+        fi
+    fi
+
+    install -d "$ROOT/etc/network/interfaces.d"
+    write_file "$snippet" 644 < <(render_lan_nic)
+    if ((!has_addr)); then
+        if ((existed)); then
+            # an older address of ours is still on the NIC
+            ifdown --force "$LAN_IF" >/dev/null 2>&1 || true
+            ip -4 addr flush dev "$LAN_IF"
+        fi
+        if ifup "$LAN_IF"; then
+            LAN_NOTE="$LAN_IF is up with $LAN_ADDR/$prefix (configured in $snippet)."
+        else
+            LAN_NOTE="WARNING: ifup $LAN_IF failed; check $snippet and run: ifup $LAN_IF"
+        fi
+    else
+        LAN_NOTE="$LAN_IF has $LAN_ADDR/$prefix (configured in $snippet)."
+    fi
+}
+
 # set_service <unit> <changed>: enable it and (re)start only when its config changed
 set_service() {
     systemctl enable "$1" >/dev/null 2>&1
@@ -284,7 +402,8 @@ set_service() {
 
 main() {
     local proton_conf=${1:-}
-    local nic pkg
+    local nic pkg net_addr net_len
+    local net_re='^([0-9.]+)/([0-9]+)$'
     local -a missing=()
     local wg_changed=0 nft_changed=0 unbound_changed=0
 
@@ -295,8 +414,14 @@ main() {
         ip link show "$nic" >/dev/null 2>&1 || die "interface $nic not found; set WAN_IF/LAN_IF (see: ip -br link)"
     done
     [[ $WAN_IF != "$LAN_IF" ]] || die "WAN_IF and LAN_IF must be different NICs"
-    [[ $LAN_ADDR =~ ^[0-9]+(\.[0-9]+){3}$ ]] || die "LAN_ADDR '$LAN_ADDR' is not an IPv4 address"
-    [[ $LAN_NET =~ ^[0-9]+(\.[0-9]+){3}/[0-9]+$ ]] || die "LAN_NET '$LAN_NET' is not an IPv4 network (a.b.c.d/n)"
+    valid_ipv4 "$LAN_ADDR" || die "LAN_ADDR '$LAN_ADDR' is not an IPv4 address"
+    [[ $LAN_NET =~ $net_re ]] || die "LAN_NET '$LAN_NET' is not an IPv4 network (a.b.c.d/n)"
+    net_addr=${BASH_REMATCH[1]} # valid_ipv4 overwrites BASH_REMATCH, so copy what we need first
+    net_len=${BASH_REMATCH[2]}
+    if ! valid_ipv4 "$net_addr" || ((10#$net_len > 32)); then
+        die "LAN_NET '$LAN_NET' is not an IPv4 network (a.b.c.d/n)"
+    fi
+    in_net "$LAN_ADDR" "$LAN_NET" || die "LAN_ADDR $LAN_ADDR is not inside LAN_NET $LAN_NET"
     build_ssh_wan_block
 
     # Validate the Proton config before touching anything
@@ -348,6 +473,8 @@ main() {
     set_service unbound "$unbound_changed"
     set_service "wg-quick@$WG_IF" "$wg_changed"
 
+    configure_lan_nic
+
     # The gateway resolves through its own unbound (and so the tunnel); the firewall
     # blocks DNS to the ISP's resolver anyway
     local dhclient_conf="$ROOT/etc/dhcp/dhclient.conf"
@@ -361,12 +488,13 @@ main() {
 
     echo
     echo "Done."
+    echo "  NIC B: $LAN_NOTE"
     echo "  Clients on $LAN_IF: gateway and DNS $LAN_ADDR."
     if [[ -n $SSH_WAN_ALLOW ]]; then
         echo "  SSH is open on $LAN_IF and, from $SSH_WAN_ALLOW, on $WAN_IF."
     else
         echo "  SSH is only open on $LAN_IF (set SSH_WAN_ALLOW to also allow it on $WAN_IF)."
-        echo "  Locked out? On the Proxmox console: nft insert rule inet gateway input tcp dport $SSH_PORT accept"
+        echo "  Locked out? As root on the Proxmox console: nft insert rule inet gateway input tcp dport $SSH_PORT accept"
     fi
     echo "  Check the tunnel with: wg show $WG_IF"
 }

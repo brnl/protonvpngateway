@@ -21,6 +21,9 @@ gateway_wg_address: 10.2.0.2/32 # [Interface] Address
 gateway_wg_dns: 10.2.0.1 # [Interface] DNS; unbound forwards to it through the tunnel
 gateway_wg_mtu: "" # empty = wg-quick default (1420)
 gateway_wg_keepalive: 25
+# wg-quick's own fwmark/table number. The firewall gives SSH replies this mark so they bypass the
+# tunnel; it must match the FwMark in wg0.conf (the role writes both from this variable).
+gateway_wg_fwmark: 51820
 
 # Required, no defaults. Put the private key in an ansible-vault file.
 gateway_wg_private_key: "" # [Interface] PrivateKey

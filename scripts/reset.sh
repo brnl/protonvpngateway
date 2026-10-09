@@ -15,20 +15,23 @@
 #
 # Settings (environment variables, all optional):
 #   WAN_IF=ens18    NIC A: where the DNS servers are read from (its last DHCP lease)
+#   LAN_IF=ens19    NIC B: the address setup.sh gave it is removed again
 #   WG_IF=wg0       name of the tunnel interface
 #   DNS_SERVERS=""  space separated DNS servers for /etc/resolv.conf, instead of the lease's
 #
-# What it undoes: the tunnel (wg-quick@wg0) and its config, the `gateway` nftables table and
-# /etc/nftables.conf (replaced by Debian's stock one), the unbound forwarder config, the
-# sysctl file (forwarding off, IPv6 on again), and the DNS settings (dhclient.conf, resolv.conf).
+# What it undoes: the tunnel (wg-quick@wg0) and its config, the nftables tables (`gateway`,
+# `gateway_route`) and /etc/nftables.conf (replaced by Debian's stock one), the unbound forwarder
+# config, the sysctl file (forwarding off, IPv6 on), the address setup.sh gave NIC B, and the DNS
+# settings (dhclient.conf, resolv.conf).
 # A file is only touched if it still carries this project's marker text, so a config you made
-# yourself is left alone. Not touched: network interface config, installed packages (unless
+# yourself is left alone. Not touched: NIC A's network config, installed packages (unless
 # --purge-packages), this repo and your Proton download. Clients lose their internet access
 # (no forwarding, no NAT), they don't leak. A reboot afterwards makes sure IPv6 is fully back.
 # Set up again with ./scripts/setup.sh proton.conf.
 set -euo pipefail
 
 WAN_IF=${WAN_IF:-ens18}
+LAN_IF=${LAN_IF:-ens19}
 WG_IF=${WG_IF:-wg0}
 DNS_SERVERS=${DNS_SERVERS:-}
 ROOT=${ROOT:-} # test hook: look for files under this prefix instead of /
@@ -43,6 +46,7 @@ MARK_NFT='# ProtonVPN gateway ruleset.'
 MARK_UNBOUND='DNS forwarder for the clients on NIC B'
 MARK_SYSCTL='IPv6 is disabled so nothing can bypass the IPv4-only tunnel'
 MARK_WG='# No DNS= line: wg-quick would need resolvconf.'
+MARK_LAN='# Managed by protonvpngateway scripts/setup.sh'
 DHCLIENT_LINE='supersede domain-name-servers 127.0.0.1;'
 
 DRY=1 # 1 while only printing the plan
@@ -159,6 +163,9 @@ step_firewall() {
     if nft list table inet gateway >/dev/null 2>&1; then
         do_step "remove the 'gateway' nftables table (NAT and kill switch)" nft delete table inet gateway
     fi
+    if nft list table ip gateway_route >/dev/null 2>&1; then
+        do_step "remove the 'gateway_route' nftables table (SSH reply marking)" nft delete table ip gateway_route
+    fi
     if is_ours "$conf" "$MARK_NFT"; then
         do_step "put Debian's stock ruleset back in $conf" write_default_nft "$conf"
     fi
@@ -179,7 +186,23 @@ step_sysctl() {
     if is_ours "$conf" "$MARK_SYSCTL"; then
         do_step "remove $conf" rm -f "$conf"
         do_step "turn IP forwarding off and IPv6 back on" \
-            sysctl -w net.ipv4.ip_forward=0 net.ipv6.conf.all.disable_ipv6=0 net.ipv6.conf.default.disable_ipv6=0
+            sysctl -w net.ipv4.ip_forward=0 net.ipv6.conf.all.disable_ipv6=0 net.ipv6.conf.default.disable_ipv6=0 net.ipv4.conf.all.rp_filter=0
+    fi
+}
+
+# lan_nic_down: take NIC B's address away again (ifupdown first, so its state stays consistent)
+lan_nic_down() {
+    if command -v ifdown >/dev/null 2>&1; then
+        ifdown --force "$LAN_IF" >/dev/null 2>&1 || true
+    fi
+    ip -4 addr flush dev "$LAN_IF"
+}
+
+step_lan_nic() {
+    local snippet="$ROOT/etc/network/interfaces.d/protonvpngateway-lan"
+    if is_ours "$snippet" "$MARK_LAN"; then
+        do_step "take $LAN_IF down again (it only has the address setup.sh gave it)" lan_nic_down
+        do_step "remove $snippet" rm -f "$snippet"
     fi
 }
 
@@ -233,6 +256,7 @@ steps() {
     step_firewall
     step_unbound
     step_sysctl
+    step_lan_nic
     step_dns
     step_wg_conf
     step_packages
