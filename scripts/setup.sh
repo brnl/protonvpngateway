@@ -365,8 +365,8 @@ main() {
     if [[ -n $SSH_WAN_ALLOW ]]; then
         echo "  SSH is open on $LAN_IF and, from $SSH_WAN_ALLOW, on $WAN_IF."
     else
-        echo "  SSH is only open on $LAN_IF (set SSH_WAN_ALLOW to also allow it on $WAN_IF;"
-        echo "  until then use the Proxmox console if you get locked out)."
+        echo "  SSH is only open on $LAN_IF (set SSH_WAN_ALLOW to also allow it on $WAN_IF)."
+        echo "  Locked out? On the Proxmox console: nft insert rule inet gateway input tcp dport $SSH_PORT accept"
     fi
     echo "  Check the tunnel with: wg show $WG_IF"
 }
