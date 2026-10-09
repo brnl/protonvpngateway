@@ -1,5 +1,5 @@
 ---
-# Copy this directory to ./group_vars/gateway/ (git-ignored). All variables and
+# Copy this directory to ./group_vars/vpngateway/ (git-ignored). All variables and
 # their defaults are documented in roles/gateway/defaults/main.yml.
 
 gateway_wan_if: ens18

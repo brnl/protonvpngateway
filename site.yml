@@ -1,6 +1,6 @@
 ---
 - name: ProtonVPN gateway
-  hosts: gateway
+  hosts: vpngateway
   become: true
   roles:
     - gateway

@@ -7,7 +7,7 @@
       - gateway_wg_endpoint_ip is match('^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
     fail_msg: >-
       Set gateway_wg_private_key, gateway_wg_peer_public_key and gateway_wg_endpoint_ip
-      (an IPv4 address) from your Proton WireGuard config, see examples/group_vars/gateway/.
+      (an IPv4 address) from your Proton WireGuard config, see examples/group_vars/vpngateway/.
     quiet: true
 
 - name: Check that both NICs exist
